@@ -1,0 +1,9 @@
+{
+  "name": "explore",
+  "version": 1.2,
+  "stable": false,
+  "license": null,
+  "authors": [{"name": "Ada", "roles": ["dev", "docs"]}, {"name": "Lin", "roles": []}],
+  "config": {"theme": "ranger", "columns": [1, 3, 4], "weird key!": "quoted in the path bar"},
+  "description": "A long string that wraps in the preview pane so you can see how leaf values are rendered when they don't fit on one line."
+}
