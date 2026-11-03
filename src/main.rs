@@ -1,5 +1,6 @@
 mod app;
 mod command;
+mod convert;
 mod keymap;
 mod provider;
 mod theme;
@@ -12,7 +13,7 @@ use ratatui::{
     crossterm::event::{self, Event, KeyEventKind},
 };
 
-use crate::{app::App, keymap::Keymap};
+use crate::{app::App, convert::Format, keymap::Keymap, provider::OpenOptions};
 
 /// Browse nested data in ranger-style columns.
 #[derive(Parser)]
@@ -25,6 +26,11 @@ struct Cli {
     /// Use this provider instead of auto-detecting one.
     #[arg(short, long)]
     provider: Option<String>,
+
+    /// Input format, converted to JSON with `jet` unless it is JSON.
+    /// Defaults to the file extension, else JSON.
+    #[arg(short = 'i', long, value_enum, value_name = "FORMAT")]
+    from: Option<Format>,
 
     /// Run commands on startup, e.g. -c 'enter; down 3'. Repeatable.
     #[arg(short, long = "command", value_name = "COMMANDS")]
@@ -47,7 +53,11 @@ fn main() -> Result<()> {
 
     // Load before touching the terminal so errors print normally.
     let source = cli.source.expect("clap enforces source");
-    let provider = provider::open(&source, cli.provider.as_deref())?;
+    let provider = provider::open(
+        &source,
+        cli.provider.as_deref(),
+        OpenOptions { from: cli.from },
+    )?;
     let mut app = App::new(provider, Keymap::defaults())?;
     for line in &cli.commands {
         app.run_line(line);

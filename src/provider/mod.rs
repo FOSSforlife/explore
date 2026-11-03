@@ -21,6 +21,8 @@ use std::borrow::Cow;
 
 use anyhow::{Result, anyhow, bail};
 
+use crate::convert::Format;
+
 /// Identifies one child within its parent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -104,6 +106,13 @@ pub trait Provider {
     }
 }
 
+/// Settings from the command line that affect how a source is read.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenOptions {
+    /// Input format given with `--from`; `None` means auto-detect.
+    pub from: Option<Format>,
+}
+
 /// Knows how to recognise and open one kind of source.
 pub trait ProviderFactory {
     fn name(&self) -> &'static str;
@@ -112,7 +121,7 @@ pub trait ProviderFactory {
     /// Cheap guess (e.g. by extension) whether this factory handles `source`.
     fn detect(&self, source: &str) -> bool;
 
-    fn open(&self, source: &str) -> Result<Box<dyn Provider>>;
+    fn open(&self, source: &str, opts: OpenOptions) -> Result<Box<dyn Provider>>;
 }
 
 /// All known providers, in auto-detection priority order.
@@ -124,7 +133,7 @@ pub fn registry() -> Vec<Box<dyn ProviderFactory>> {
 ///
 /// Detection first asks each factory's [`ProviderFactory::detect`]; if none
 /// claims the source, every factory is tried in turn.
-pub fn open(source: &str, provider: Option<&str>) -> Result<Box<dyn Provider>> {
+pub fn open(source: &str, provider: Option<&str>, opts: OpenOptions) -> Result<Box<dyn Provider>> {
     let factories = registry();
 
     if let Some(name) = provider {
@@ -132,16 +141,16 @@ pub fn open(source: &str, provider: Option<&str>) -> Result<Box<dyn Provider>> {
             let names: Vec<_> = factories.iter().map(|f| f.name()).collect();
             anyhow!("unknown provider `{name}` (available: {})", names.join(", "))
         })?;
-        return factory.open(source);
+        return factory.open(source, opts);
     }
 
     if let Some(factory) = factories.iter().find(|f| f.detect(source)) {
-        return factory.open(source);
+        return factory.open(source, opts);
     }
 
     let mut errors = Vec::new();
     for factory in &factories {
-        match factory.open(source) {
+        match factory.open(source, opts) {
             Ok(p) => return Ok(p),
             Err(e) => errors.push(format!("  {}: {e:#}", factory.name())),
         }

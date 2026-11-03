@@ -1,4 +1,4 @@
-//! Browse JSON documents.
+//! Browse JSON documents, plus EDN, YAML and Transit converted by `jet`.
 
 use std::{
     borrow::Cow,
@@ -11,7 +11,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use super::{Entry, Key, Kind, Preview, Provider, ProviderFactory};
+use super::{Entry, Key, Kind, OpenOptions, Preview, Provider, ProviderFactory};
+use crate::convert::{self, Format};
 
 pub struct JsonFactory;
 
@@ -21,18 +22,15 @@ impl ProviderFactory for JsonFactory {
     }
 
     fn description(&self) -> &'static str {
-        "JSON documents (a file path, or `-` for stdin)"
+        "JSON documents; EDN, YAML and Transit via `jet` (a file path, or `-` for stdin)"
     }
 
     fn detect(&self, source: &str) -> bool {
-        source == "-"
-            || Path::new(source)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("geojson"))
+        source == "-" || Format::from_path(Path::new(source)).is_some()
     }
 
-    fn open(&self, source: &str) -> Result<Box<dyn Provider>> {
-        Ok(Box::new(JsonProvider::open(source)?))
+    fn open(&self, source: &str, opts: OpenOptions) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(JsonProvider::open(source, opts.from)?))
     }
 }
 
@@ -45,17 +43,31 @@ enum Origin {
 pub struct JsonProvider {
     root: Value,
     origin: Origin,
+    format: Format,
+    /// Whether `format` was given by the user rather than guessed.
+    explicit: bool,
 }
 
 impl JsonProvider {
-    pub fn open(source: &str) -> Result<Self> {
+    /// Open `source` as `from`, or guess the format from its extension
+    /// (falling back to JSON).
+    pub fn open(source: &str, from: Option<Format>) -> Result<Self> {
         let origin = if source == "-" {
             Origin::Stdin
         } else {
             Origin::File(source.into())
         };
-        let root = load(&origin)?;
-        Ok(Self { root, origin })
+        let format = from
+            .or_else(|| Format::from_path(Path::new(source)))
+            .unwrap_or(Format::Json);
+        let mut p = Self {
+            root: Value::Null,
+            origin,
+            format,
+            explicit: from.is_some(),
+        };
+        p.root = p.load()?;
+        Ok(p)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -63,7 +75,24 @@ impl JsonProvider {
         Self {
             root,
             origin: Origin::Memory,
+            format: Format::Json,
+            explicit: false,
         }
+    }
+
+    fn load(&self) -> Result<Value> {
+        let text = match &self.origin {
+            Origin::File(p) => {
+                fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
+            }
+            Origin::Stdin => {
+                let mut s = String::new();
+                io::stdin().read_to_string(&mut s).context("reading stdin")?;
+                s
+            }
+            Origin::Memory => bail!("nothing to load"),
+        };
+        parse(text, self.format, self.explicit)
     }
 
     fn resolve(&self, path: &[Key]) -> Result<&Value> {
@@ -78,19 +107,32 @@ impl JsonProvider {
     }
 }
 
-fn load(origin: &Origin) -> Result<Value> {
-    let text = match origin {
-        Origin::File(p) => {
-            fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?
-        }
-        Origin::Stdin => {
-            let mut s = String::new();
-            io::stdin().read_to_string(&mut s).context("reading stdin")?;
-            s
-        }
-        Origin::Memory => bail!("nothing to load"),
-    };
-    serde_json::from_str(&text).context("parsing JSON")
+/// Parse `text` in `format`. `explicit` says whether the user chose the
+/// format, which decides whether a JSON error hints at `--from`.
+fn parse(text: String, format: Format, explicit: bool) -> Result<Value> {
+    if format == Format::Json {
+        return serde_json::from_str(&text).map_err(|e| {
+            let hint = if explicit {
+                ""
+            } else {
+                "\nhint: if the input is not JSON, name its format with \
+                 `--from edn`, `--from yaml` or `--from transit`"
+            };
+            anyhow!("parsing JSON: {e}{hint}")
+        });
+    }
+    let json = convert::to_json(text, format)?;
+    // jet writes one document per top-level value (EDN and Transit allow
+    // several); show more than one as an array.
+    let mut values = serde_json::Deserializer::from_str(&json)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parsing jet's JSON output for {}", format.name()))?;
+    Ok(if values.len() == 1 {
+        values.pop().expect("one value")
+    } else {
+        Value::Array(values)
+    })
 }
 
 fn entry(key: Key, label: String, v: &Value) -> Entry {
@@ -178,7 +220,7 @@ impl Provider for JsonProvider {
             Origin::Stdin => bail!("cannot reload stdin"),
             Origin::Memory => Ok(()),
             Origin::File(_) => {
-                self.root = load(&self.origin)?;
+                self.root = self.load()?;
                 Ok(())
             }
         }
@@ -223,6 +265,24 @@ mod tests {
             }
         );
         assert!(p.children(&[Key::Name("nope".into())]).is_err());
+    }
+
+    #[test]
+    fn json_errors_hint_at_from_unless_explicit() {
+        let err = parse("{:a 1}".into(), Format::Json, false).unwrap_err();
+        assert!(err.to_string().contains("--from edn"), "{err}");
+        let err = parse("{:a 1}".into(), Format::Json, true).unwrap_err();
+        assert!(!err.to_string().contains("--from"), "{err}");
+    }
+
+    #[test]
+    fn collects_multiple_converted_values() {
+        if std::process::Command::new("jet").arg("--version").output().is_err() {
+            eprintln!("skipping: jet not installed");
+            return;
+        }
+        assert_eq!(parse("{:a 1}".into(), Format::Edn, true).unwrap(), json!({"a": 1}));
+        assert_eq!(parse("1 {:a 2}".into(), Format::Edn, true).unwrap(), json!([1, {"a": 2}]));
     }
 
     #[test]
